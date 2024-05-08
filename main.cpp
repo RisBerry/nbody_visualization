@@ -11,6 +11,8 @@
 // **Prefer using the code in the example_sdl2_opengl3/ folder**
 // See imgui_impl_sdl2.cpp for details.
 
+#include <windows.h>
+
 #include "SDL_timer.h"
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
@@ -20,7 +22,10 @@
 #include <stdio.h>
 #include <SDL.h>
 #include <SDL_opengl.h>
-#include <glu.h>
+#include <GL/glu.h>
+#include <omp.h>
+
+#include "args.hxx"
 
 #include "nbody.hpp"
 
@@ -69,11 +74,92 @@ void cube(float x, float y, float z, float size)
     glEnd();
 }
 
+class RingBuffer {
+	public:
+        RingBuffer(int size) {
+            _size = size;
+            buffer = new float[get_size()];
+
+            clear();
+        }
+
+        ~RingBuffer() {
+            delete buffer;
+        }
+
+        void write(real_type value) {
+            buffer[_bufferPtr] = (float)value;
+            if (++_bufferPtr == get_size())  _bufferPtr = 0;
+        }
+
+        void clear() {
+			std::fill_n(buffer, get_size(), 0.);
+            _bufferPtr = 0;
+        }
+
+        inline int get_size() { return _size; };
+        inline float* get_ptr() { return buffer; };
+	private:
+		float *buffer;
+		int _bufferPtr;
+        int _size;
+};
+
 // Main code
-int main(int, char**)
-{
+int main(int argc, char* argv[]) {
+    args::ArgumentParser parser("NBody simulation tool.", "");
+    args::HelpFlag help(parser, "help", "Display this help menu", { 'h', "help" });
+    args::Flag gui(parser, "GUI", "Enable GUI", {'g', "gui"});
+    args::ValueFlag<int> seed(parser, "seed", "Simulation seed", { "seed" });
+    args::ValueFlag<int> size(parser, "size", "Initial object count", { "size" });
+    args::ValueFlag<real_type> dT(parser, "delta time", "Delta time for simulation", { "dt" });
+    args::ValueFlag<real_type> maxMass(parser, "max mass", "Maximum initial mass", { 'm', "mass" });
+    args::ValueFlag<real_type> maxVel(parser, "max velocity", "Maximum initial velocity", {'v', "vel"});
+
+    args::ValueFlag<int> ticks(parser, "tick count", "Tick count for simulation", {'t', "ticks"});
+
+    try {
+        parser.ParseCLI(argc, argv);
+    } catch (args::Help) {
+        std::cout << parser;
+        return 0;
+    } catch (args::ParseError e) {
+        std::cerr << e.what() << std::endl;
+        std::cerr << parser;
+        return 1;
+    } catch (args::ValidationError e) {
+        std::cerr << e.what() << std::endl;
+        std::cerr << parser;
+        return 1;
+    }
+
     GSimulation simulation;
+
+    if (seed)    simulation.seed    = args::get(seed);
+    if (size)    simulation.count   = args::get(size);
+    if (dT)      simulation.dTime   = args::get(dT);
+    if (maxMass) simulation.maxMass = args::get(maxMass);
+    if (maxVel)  simulation.maxVel  = args::get(maxVel);
+
     simulation.init();
+
+    if (ticks) {
+        printf("Ticks |   Time    | Potential E      | Kinetic E        | Full energy      | Deviation| Comp Time|\n");
+        for (int i = 0; i < args::get(ticks); i++) {
+            simulation.tickTimed();
+            printf("%5d | %9.4f | %16.8f | %16.8f | %16.8f | %9.4f| %9.6f|\n", 
+                simulation.tickCount,
+                simulation.elapsedTime,
+                simulation.pEnergy,
+                simulation.kEnergy,
+                simulation.fEnergy,
+                simulation.energy_deviation(),
+                simulation.computeTime);
+        }
+    }
+
+    if (!gui)
+        return 0;
     
     // Setup SDL
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_GAMECONTROLLER) != 0)
@@ -87,6 +173,9 @@ int main(int, char**)
     SDL_SetHint(SDL_HINT_IME_SHOW_UI, "1");
 #endif
 
+    int windowWidth = 1280;
+    int windowHeight = 720;
+
     // Setup window
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
@@ -94,7 +183,9 @@ int main(int, char**)
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
     SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
-    SDL_Window* window = SDL_CreateWindow("GLQUAKE", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720, window_flags);
+    int displaySelect = SDL_GetNumVideoDisplays() == 1 ? 0 : 1;
+    SDL_Window* window = SDL_CreateWindow("GLQUAKE", SDL_WINDOWPOS_CENTERED_DISPLAY(displaySelect), 
+        SDL_WINDOWPOS_CENTERED_DISPLAY(displaySelect), windowWidth, windowHeight, window_flags);
     if (window == nullptr)
     {
         printf("Error: SDL_CreateWindow(): %s\n", SDL_GetError());
@@ -137,7 +228,7 @@ int main(int, char**)
     //IM_ASSERT(font != nullptr);
 
     // Our state
-    ImVec4 clear_color = ImVec4(0.20f, 0.15f, 0.10f, 1.00f);
+    ImVec4 clear_color = ImVec4(0.10f, 0.15f, 0.20f, 1.00f);
     ImVec4 cameraPosition = ImVec4(1.2f, 1.5f, 1.8f, 1.f);
     GLfloat lightPosition[4] = {2.f, 2.f, 2.f, 1.f};
     GLfloat yFov = 60;
@@ -152,15 +243,19 @@ int main(int, char**)
 
     bool spinCamera = true;
     unsigned int spinStart = 0;
-    float spinDivider = 4.;
+    float spinDivider = 6.;
 
     bool runSimulation = false;
     int updtatesCount = 1;
 
     Particle* particles = simulation.getPtr();
-    float energyHistory[1000];
-    std::fill_n(energyHistory, 1000, 0.);
-    int energyPtr;
+
+    RingBuffer energyHistory(1000);
+    RingBuffer energyKHistory(1000);
+    RingBuffer energyPHistory(1000);
+    RingBuffer deviation(1000);
+
+    int lookAtObject = -1;
 
     // Main loop
     bool done = false;
@@ -173,6 +268,8 @@ int main(int, char**)
     
     while (!done)
     {
+        SDL_GetWindowSize(window, &windowWidth, &windowHeight);
+
         // Poll and handle events (inputs, window resize, etc.)
         // You can read the io.WantCaptureMouse, io.WantCaptureKeyboard flags to tell if dear imgui wants to use your inputs.
         // - When io.WantCaptureMouse is true, do not dispatch mouse input data to your main application, or clear/overwrite your copy of the mouse data.
@@ -208,7 +305,9 @@ int main(int, char**)
                 ImGui::SliderInt("sphere subdivision", &subDivision, 2, 40);
                 ImGui::Separator();
                 ImGui::DragFloat3("camera position", (float*)&cameraPosition, 0.1f, -2., 2.);
-                ImGui::SliderFloat("spin divider", &spinDivider, 1., 5.);
+                ImGui::DragInt("camera lookAt", &lookAtObject, 1, -1, simulation.get_count()-1);
+                ImGui::SliderFloat("yFov", &yFov, 10, 120);
+                ImGui::SliderFloat("spin divider", &spinDivider, 1., 10.);
                 if (ImGui::Button("start spin")) {
                     spinStart = SDL_GetTicks();
                     spinCamera = true;
@@ -218,22 +317,20 @@ int main(int, char**)
                     spinStart = SDL_GetTicks();
                     spinCamera = false;
                 }
-                ImGui::DragFloat3("light position", (float*)&lightPosition, 0.1f, -2., 2.);
-                ImGui::Checkbox("show light point", &lightShow);
                 ImGui::Separator();
                 ImGui::ColorEdit3("clear color", (float*)&clear_color); // Edit 3 floats representing a color
-                ImGui::SliderFloat("yFov", &yFov, 10, 120);
-                //ImGui::EndMenu();
+                ImGui::DragFloat3("light position", (float*)&lightPosition, 0.1f, -2., 2.);
+                ImGui::Checkbox("show light point", &lightShow);
             }
 
             if (ImGui::CollapsingHeader("Generator settings")) {
                 ImGui::DragInt("seed", &simulation.seed);
                 ImGui::DragInt("object count", &simulation.count, 1, 1, 100000);
                 real_type minValue = 0.1;
-                ImGui::DragScalar("max mass", ImGuiDataType_Double, &simulation.maxMass, 0.1f, &minValue);
+                ImGui::DragScalar("max mass", ImGuiDataType_Real, &simulation.maxMass, 0.1f, &minValue);
                 real_type minValueAcc = 0.;
-                ImGui::DragScalar("max velocity", ImGuiDataType_Double, &simulation.maxVel, 0.01f, &minValueAcc);
-                ImGui::DragScalar("max acceleration", ImGuiDataType_Double, &simulation.maxAcc, 0.01f, &minValueAcc);
+                ImGui::DragScalar("max velocity", ImGuiDataType_Real, &simulation.maxVel, 0.01f, &minValueAcc);
+                ImGui::DragScalar("max acceleration", ImGuiDataType_Real, &simulation.maxAcc, 0.01f, &minValueAcc);
                 if (ImGui::Button("regenerate")) {
                     simulation.remove();
                     simulation.init();
@@ -244,32 +341,67 @@ int main(int, char**)
             if (ImGui::CollapsingHeader("Simulation settings")) {
                 real_type mMin = 0.01;
                 real_type mMax = 1.;
-                ImGui::Text("Elapsed ticks: %d", simulation.tickCount);
-                ImGui::Text("Elapsed time: %f", simulation.elapsedTime);
-                ImGui::SliderScalar("delta time", ImGuiDataType_Double, &simulation.dTime, &mMin, &mMax);
-                ImGui::DragInt("updates per frame", &updtatesCount, 1, 1, 10);
+                ImGui::SliderScalar("delta time", ImGuiDataType_Real, &simulation.dTime, &mMin, &mMax);
+                ImGui::SliderInt("updates per frame", &updtatesCount, 1, 100);
                 ImGui::Checkbox("run simulation", &runSimulation);
                 ImGui::SameLine();
-                if (ImGui::Button("next tick"))
-                    simulation.tick();
-                ImGui::Text("     Full energy %f", simulation.pEnergy+simulation.kEnergy);
+                if (ImGui::Button("next tick")) {
+                    simulation.tickTimed();
+                    energyHistory.write(fabs(simulation.fEnergy));
+                    energyKHistory.write(fabs(simulation.kEnergy));
+                    energyPHistory.write(fabs(simulation.pEnergy));
+					deviation.write(simulation.energy_deviation());
+                }
+                ImGui::Text("Compute time : %f", simulation.computeTime);
+            }
+
+            if (ImGui::CollapsingHeader("Simulation view")) {
+                ImGui::Text("Elapsed ticks: %d", simulation.tickCount);
+                ImGui::Text("Elapsed time : %f", simulation.elapsedTime);
+                ImGui::Separator();
+                ImGui::Text("     Full energy %f", simulation.fEnergy);
                 ImGui::Text("  Kinetic energy %f", simulation.kEnergy);
                 ImGui::Text("Potential energy %f", simulation.pEnergy);
-                ImGui::PlotLines("Full energy", energyHistory, IM_ARRAYSIZE(energyHistory), 0, NULL, 0., FLT_MAX, ImVec2(300,100));
+                ImGui::Text("    Deviation, %% %f", simulation.energy_deviation());
+                ImGui::PlotLines("Full energy", energyHistory.get_ptr(), energyHistory.get_size(), 0, NULL, FLT_MIN, FLT_MAX, ImVec2(300, 60));
+                ImGui::PlotLines("Kinetic energy", energyKHistory.get_ptr(), energyKHistory.get_size(), 0, NULL, FLT_MIN, FLT_MAX, ImVec2(300, 60));
+                ImGui::PlotLines("Potential energy", energyPHistory.get_ptr(), energyPHistory.get_size(), 0, NULL, FLT_MIN, FLT_MAX, ImVec2(300, 60));
+                ImGui::PlotLines("Deviation", deviation.get_ptr(), deviation.get_size(), 0, NULL, FLT_MIN, FLT_MAX, ImVec2(300, 60));
+                if (ImGui::Button("clear")) {
+                    energyHistory.clear();
+                    energyKHistory.clear();
+                    energyPHistory.clear();
+                    deviation.clear();
+				}
+                ImGui::SameLine();
+                if (ImGui::Button("reset initial energy"))
+                    simulation.rewrite_initialEnergy();
             }
 
             if (ImGui::CollapsingHeader("Object settings")) {
+                if (ImGui::Button("save state"))
+                    simulation.save_state();
+
+                ImGui::SameLine();
+
+                if (ImGui::Button("load state")) {
+                    simulation.read_state();
+                    particles = simulation.getPtr();
+                }
+
+                ImGui::SameLine();
+
                 if (ImGui::Button("recalculate colors"))
                     simulation.init_color();
 
                 for (int i = 0; i < simulation.get_count(); i++) {
                     if (ImGui::TreeNode((void *)(intptr_t)i, "Object #%d", i)) {
-                        ImGui::DragScalarN("Position", ImGuiDataType_Double, particles[i].pos, 3, 0.05);
-                        ImGui::DragScalarN("Velocity", ImGuiDataType_Double, particles[i].vel, 3, 0.05);
-                        ImGui::DragScalarN("Acceleration", ImGuiDataType_Double, particles[i].acc, 3, 0.05);
+                        ImGui::DragScalarN("Position", ImGuiDataType_Real, particles[i].pos, 3, .05);
+                        ImGui::DragScalarN("Velocity", ImGuiDataType_Real, particles[i].vel, 3, .05);
+                        ImGui::DragScalarN("Acceleration", ImGuiDataType_Real, particles[i].acc, 3, .05);
                         real_type mMin = 0.;
                         real_type mMax = simulation.get_mass()*10.;
-                        ImGui::SliderScalar("Mass", ImGuiDataType_Double, &particles[i].mass, &mMin, &mMax);
+                        ImGui::DragScalar("Mass", ImGuiDataType_Real, &particles[i].mass);
                         ImGui::ColorEdit3("Color", particles[i].color);
                         ImGui::Text("     Full energy %f", particles[i].pEnergy+particles[i].kEnergy);
                         ImGui::Text("  Kinetic energy %f", particles[i].kEnergy);
@@ -284,11 +416,11 @@ int main(int, char**)
         //Simulate
         if (runSimulation)
             for (int i = 0; i < updtatesCount; i++) {
-                simulation.tick();
-                energyHistory[energyPtr] = simulation.kEnergy + simulation.pEnergy;
-                energyPtr++;
-                if (energyPtr == 1000)
-                    energyPtr = 0;
+                simulation.tickTimed();
+                energyHistory.write(abs(simulation.fEnergy));
+				energyKHistory.write(fabs(simulation.kEnergy));
+				energyPHistory.write(fabs(simulation.pEnergy));
+				deviation.write(simulation.energy_deviation());
             }
 
         // Rendering
@@ -303,18 +435,31 @@ int main(int, char**)
 
         glMatrixMode(GL_PROJECTION);
         glLoadIdentity();
-        gluPerspective(yFov, 16./9., 1./16., 256.);
+        gluPerspective(yFov, (float)windowWidth/(float)windowHeight, 1./16., 256.);
 
         glMatrixMode(GL_MODELVIEW);
         glLoadIdentity();
         double time = (SDL_GetTicks()-spinStart)/1000.;
+
+        GLdouble lookX, lookY, lookZ;
+        if (lookAtObject == -1 || lookAtObject >= simulation.get_count()) {
+            lookX = .5;
+            lookY = .5;
+            lookZ = .5;
+        } else {
+            Particle p = particles[lookAtObject];
+            lookX = p.pos[0];
+            lookY = p.pos[1];
+            lookZ = p.pos[2];
+        }
+
         if (spinCamera)
             gluLookAt(cameraPosition.x * sin(time/spinDivider), cameraPosition.y, cameraPosition.z *  cos(time/spinDivider)
-                    , 0.5, 0.5, 0.5
+                    , lookX, lookY, lookZ 
                     , 0., 1., 0.);
         else
             gluLookAt(cameraPosition.x, cameraPosition.y, cameraPosition.z
-                    , 0.5, 0.5, 0.5
+                    , lookX, lookY, lookZ 
                     , 0., 1., 0.);
 
         glColor3f(1,1,1);
