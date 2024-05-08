@@ -11,7 +11,7 @@
 // **Prefer using the code in the example_sdl2_opengl3/ folder**
 // See imgui_impl_sdl2.cpp for details.
 
-#include <windows.h>
+//#include <windows.h>
 
 #include "SDL_timer.h"
 #include "imgui.h"

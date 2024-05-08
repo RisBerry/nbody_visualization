@@ -23,7 +23,7 @@ find_package(SDL2 REQUIRED)
 #add_compile_options(-O3 -qopenmp -shared-intel -xCORE-AVX2 -qopt-report=max -debug)
 #add_compile_options(-Og -shared-intel -qopt-report=max -debug)
 
-# /arch:CORE-AVX2 -Qopenmp /QxCORE-AVX2 -qopenmp 
+#/arch:CORE-AVX2 -Qopenmp /QxCORE-AVX2 -qopenmp 
 
 
 
@@ -51,17 +51,24 @@ include_directories(/usr/include/SDL2)
 include_directories(/usr/include/GL)
 include_directories(/usr/include/glut)
 
+#include_directories(~/intel/oneapi/2024.1/include)
 
 project(homework)
 add_executable(homework main.cpp)
-target_sources(homework PUBLIC nbody.hpp nbody.cpp)
+target_sources(homework PUBLIC nbody.hpp nbody.cpp args.hxx)
 #add_executable(homework PUBLIC main.cpp)
 
 #target_compile_options(homework PRIVATE -Og -qopt-report=max -debug)
-target_compile_options(homework PRIVATE -Og -debug)
+#target_compile_options(homework PRIVATE -Og -debug )
+#target_compile_options(homework PRIVATE -O3 -debug -xCORE-AVX2 -qopenmp-stubs)
+target_compile_options(homework PRIVATE -O3 -debug -xCORE-AVX2 -qopenmp)
+
+#find_library(NAMES omp PATHS ~/intel/oneapi/2024.1/lib)
 
 target_link_libraries(homework imgui)
 target_link_libraries(homework GL)
 target_link_libraries(homework GLU)
 target_link_libraries(homework SDL2)
+target_link_libraries(homework omp)
+#target_link_libraries(homework ~/intel/oneapi/2024.1/lib/libiomp5.so)
 message(STATUS ${CMAKE_CURRENT_SOURCE_DIR})
