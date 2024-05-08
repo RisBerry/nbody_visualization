@@ -172,7 +172,7 @@ void GSimulation::tick() {
         ANNOTATE_ITERATION_TASK(pos_task);
         {
 #endif
-            real_type coef = 1.5;
+            real_type coef = 1.;
 
             particles[i].vel[0] += particles[i].acc[0] * dt * coef;	//2flops
             particles[i].vel[1] += particles[i].acc[1] * dt * coef;	//2flops
